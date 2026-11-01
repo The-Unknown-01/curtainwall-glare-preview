@@ -1,3 +1,5 @@
+import { traceTwin, finPoint, recommend, summarize } from './twin.js';
+import { initDashboard } from './dashboard.js';
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { solarPosition, sunVector, previewDni, localToUtc, dayOfYear, fromDayOfYear } from "./solar.js";
@@ -5,15 +7,16 @@ import {
   toThree,
   prepareTile,
   rankSubjects,
-  traceTile,
   pickHero,
   selectDrawn,
   describePath,
   tiltedPoint,
-} from "./optics.js?v=20261011-r8";
+} from "./optics.js";
 
 const $ = (id) => document.getElementById(id);
 const state = {
+  scenario: "adaptive",
+  manualAlpha: 16,
   buildingId: "",
   alpha: 24,
   month: 12,
@@ -88,8 +91,8 @@ function qualityProfile() {
     shadow: low ? 1024 : 2048,
     antialias: !low,
     lodNear: low ? 210 : 330,
-    stepH: low ? 14 : 12,
-    stepV: low ? 18 : 15,
+    stepH: 12,
+    stepV: 7,
   };
 }
 
@@ -564,8 +567,8 @@ function curtainGeometry(building, facade, alpha) {
     for (let sill = z0; sill < z1 - 1; sill += 3.5) {
       const head = Math.min(3.15, z1 - sill);
       const corners = [0, head].map((local) => {
-        const a = tiltedPoint(edge.ax, edge.ay, local, nh, alpha);
-        const b = tiltedPoint(edge.bx, edge.by, local, nh, alpha);
+        const a = finPoint(edge.ax, edge.ay, local, nh, alpha, head);
+        const b = finPoint(edge.bx, edge.by, local, nh, alpha, head);
         return [v3(a[0], a[1], a[2] + sill), v3(b[0], b[1], b[2] + sill)];
       });
       const a0 = corners[0][0];
@@ -673,9 +676,9 @@ function heroFitPoints(hero) {
 function frameOverflow(points) {
   const narrow = window.innerWidth < 860;
   // Desktop sheet covers the right; the phone sheet covers the bottom.
-  const xMax = narrow ? 0.78 : 0.3;
+  const xMax = 0.82;
   const xMin = narrow ? -0.78 : -0.86;
-  const yMin = narrow ? -0.05 : -0.78;
+  const yMin = -0.62;
   const yMax = narrow ? 0.72 : 0.78;
   let bad = 0;
   view.camera.updateMatrixWorld(true);
@@ -691,8 +694,8 @@ function frameOverflow(points) {
 }
 
 function applySheetFraming() {
-  const width = window.innerWidth;
-  const height = Math.max(1, window.innerHeight);
+  const width = $("scene-stage").clientWidth;
+  const height = Math.max(1, $("scene-stage").clientHeight);
   view.camera.aspect = width / height;
   view.camera.clearViewOffset();
   view.camera.updateProjectionMatrix();
@@ -785,7 +788,7 @@ function frameHero(hero, subject) {
     ? focusZ + (narrow ? 22 : 30)
     : focusZ + (waterEnd ? (narrow ? 36 : 58) : Math.max(18, Math.min(48, focusZ * 0.12 + 16)));
   [eyeE, eyeN, eyeZ] = standOff(eyeE, eyeN, eyeZ, focusE, focusN, focusZ, view.tile, dist * 0.72);
-  const targetZ = Math.max(3, focusZ - (narrow ? 28 : 0));
+  const targetZ = Math.max(3, focusZ);
   view.camera.fov = narrow ? 54 : 47;
   applySheetFraming();
   view.camera.position.copy(v3(eyeE, eyeN, eyeZ));
@@ -870,7 +873,7 @@ function paintPaths() {
       const from = path.origin;
       pushSeg(
         "incoming",
-        lift(from[0] - toward[0] * 78, from[1] - toward[1] * 78, from[2] - toward[2] * 78),
+        lift(from[0] + toward[0] * 78, from[1] + toward[1] * 78, from[2] + toward[2] * 78),
         lift(from[0], from[1], from[2]),
         true,
       );
@@ -945,20 +948,22 @@ function paintPaths() {
 }
 
 function updateCurtain() {
+  if (view.curtain) view.curtain.visible = state.scenario !== "baseline";
   const subject = currentSubject();
   if (!subject) return;
   const geometry = curtainGeometry(subject.building, subject.cluster, state.alpha);
   if (!view.curtain) {
     const material = new THREE.MeshStandardMaterial({
-      color: 0xf3efe4,
+      color: 0xb5d0b5,
       roughness: 0.12,
       metalness: 0.35,
-      emissive: 0x3a2a22,
+      emissive: 0x244e30,
       emissiveIntensity: 0.18,
       side: THREE.DoubleSide,
     });
     addGlassFresnel(material, 0.28);
     view.curtain = new THREE.Mesh(geometry, material);
+    view.curtain.visible = state.scenario !== "baseline";
     view.scene.add(view.curtain);
   } else {
     view.curtain.geometry.dispose();
@@ -1075,7 +1080,8 @@ function retrace() {
     view.result = emptyResult();
     view.hero = null;
   } else {
-    view.result = traceTile(view.tile, {
+    view.result = traceTwin(view.tile, {
+      scenario: state.scenario,
       building: subject.building,
       facade: subject.cluster,
       alpha: state.alpha,
@@ -1085,7 +1091,7 @@ function retrace() {
       stepH: view.quality.stepH,
       stepV: view.quality.stepV,
     });
-    view.hero = pickHero(view.result.paths, state.mode);
+    view.hero = pickHero(state.mode === "street" && !state.showHop2 ? view.result.paths.filter(p=>p.kind === "street") : view.result.paths, state.mode);
   }
   updateCurtain();
   updateSun();
@@ -1117,6 +1123,15 @@ function retrace() {
     building: subject ? subject.building.name : "",
     sun: { elevation: sun.pos.elevationDeg, azimuth: sun.pos.azimuthDeg },
   };
+  const baseline = traceTwin(view.tile, {...currentOptions(), scenario: 'baseline', alpha: 0});
+  const detail = {state:{...state},result:view.result,baseline,sun:{...sun.pos,dni:sun.dni},meta:view.tile.meta};
+  window.__twin = {state:{...state},metrics:summarize(view.result),baseline:summarize(baseline)};
+  document.dispatchEvent(new CustomEvent('twin:update',{detail}));
+}
+
+function currentOptions() {
+  const subject=currentSubject(), sun=momentSun();
+  return {building:subject.building,facade:subject.cluster,alpha:state.alpha,scenario:state.scenario,sun:sun.sun,dni:sun.dni,rho:state.rho};
 }
 
 function writeHud(sun) {
@@ -1125,7 +1140,7 @@ function writeHud(sun) {
   const counts = view.result.counts;
   const elev = sun.pos.elevationDeg;
   let lead;
-  if (elev <= 0.35) lead = "太阳在地平线以下，没有直射，光路是空的。";
+  if (elev <= 0.35) lead = "当前低于预览太阳高度阈值，不计算直射光路。";
   else if (state.mode === "street" && !view.hero) lead = "这一时刻没有光落到街上。拧时刻或倾角，或切到「单纯看反射」看打向楼、水和天的光。";
   else if (!view.hero && counts.shaded > 0 && counts.lit === 0) lead = "这一面的直射被旁边的楼挡住了，所以没有反射折线。换一个时刻，或换一栋朝向太阳的楼。";
   else if (!view.hero && counts.backlit > 0 && counts.lit === 0) lead = "太阳在这面玻璃的背后。拧到太阳照到这面的时刻，折线才会出来。";
@@ -1136,7 +1151,7 @@ function writeHud(sun) {
   if (building) {
     const source = building.heightNote || (recordedHeight(building) ? "记录高度" : "高度推断");
     const face = subject.cluster.n[1] < -0.4 ? "朝南的一面" : "朝街的一面";
-    $("building-meta").textContent = `${building.height.toFixed(0)} m · ${source} · 玻璃皮装在${face}，α 让每一层的法线抬起来。`;
+    $("building-meta").textContent = `${building.height.toFixed(0)} m · ${source} · 候选立面 · 原幕墙固定，上铰外屏向外展开。`;
   }
   $("alpha-val").textContent = `${state.alpha.toFixed(1)}°`;
   $("date-val").textContent = `${state.month}月${state.day}日`;
@@ -1180,7 +1195,9 @@ function bind() {
     frameHero(view.hero, currentSubject());
   });
   $("alpha").addEventListener("input", () => {
+    state.scenario = "adaptive";
     state.alpha = Number($("alpha").value);
+    state.manualAlpha = state.alpha;
     retrace();
   });
   $("doy").addEventListener("input", () => {
@@ -1211,8 +1228,7 @@ function bind() {
   });
   $("hop2").addEventListener("change", () => {
     state.showHop2 = $("hop2").checked;
-    paintPaths();
-    writeHud(momentSun());
+    retrace();
   });
   $("incoming").addEventListener("change", () => {
     state.showIncoming = $("incoming").checked;
@@ -1223,8 +1239,8 @@ function bind() {
 
 function resize() {
   const canvas = $("view");
-  const width = window.innerWidth;
-  const height = window.innerHeight;
+  const width = $("scene-stage").clientWidth;
+  const height = $("scene-stage").clientHeight;
   view.renderer.setPixelRatio(view.quality.pixelRatio);
   view.renderer.setSize(width, height, false);
   applySheetFraming();
@@ -1329,8 +1345,34 @@ async function boot() {
   $("clock").value = String(state.hour * 60 + state.minute);
   $("rho").value = String(state.rho);
   bind();
+  initDashboard({
+    update(patch) {
+      if(state.scenario==='adaptive')state.manualAlpha=state.alpha;
+      Object.assign(state,patch);
+      if(state.scenario==='adaptive')state.alpha=patch.alpha??state.manualAlpha;
+      if(state.scenario==='adaptive')state.manualAlpha=state.alpha;
+      if(state.scenario==='baseline'||state.scenario==='parked')state.alpha=0;
+      if(state.scenario==='fixed')state.alpha=30;
+      $('alpha').value=state.alpha;
+      retrace();
+    },
+    compare() {
+      return ['baseline','parked','fixed','adaptive'].map(scenario=>{
+        const angle=scenario==='baseline'||scenario==='parked'?0:scenario==='fixed'?30:state.manualAlpha;
+        return {scenario,angle,metrics:summarize(traceTwin(view.tile,{...currentOptions(),scenario,alpha:angle}))};
+      });
+    },
+    recommend:()=>recommend(view.tile,currentOptions()),
+    overview() {
+      const subject=currentSubject(), c=buildingCenter(subject.building);
+      view.controls.target.copy(v3(c[0],c[1],subject.building.height*.4));
+      view.camera.position.copy(v3(c[0]+300,c[1]-450,subject.building.height+260));
+      view.controls.update();
+    }
+  });
   resize();
   window.addEventListener("resize", resize);
+  new ResizeObserver(() => resize()).observe($("scene-stage"));
   retrace();
   frameHero(view.hero, currentSubject());
   $("boot").hidden = true;
@@ -1351,5 +1393,5 @@ async function boot() {
 
 boot().catch((error) => {
   console.error(error);
-  $("boot").textContent = "阻塞：场景没有装起来。若是 OSM 数据缺失，不会用假楼顶上。";
+  $("boot").textContent = "场景加载失败。请刷新重试，或查看网络与浏览器 WebGL 支持。";
 });
