@@ -1,5 +1,6 @@
-import { traceTwin, finPoint, recommend, summarize } from './twin.js';
+import { traceTwin, summarize } from './twin.js';
 import { initDashboard } from './dashboard.js';
+import { initPathInspector } from './path-inspector.js';
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { solarPosition, sunVector, previewDni, localToUtc, dayOfYear, fromDayOfYear } from "./solar.js";
@@ -7,16 +8,16 @@ import {
   toThree,
   prepareTile,
   rankSubjects,
-  pickHero,
-  selectDrawn,
-  describePath,
-  tiltedPoint,
 } from "./optics.js";
 
 const $ = (id) => document.getElementById(id);
 const state = {
   scenario: "adaptive",
   manualAlpha: 16,
+  display: "module",
+  rayId: null,
+  eventIndex: 0,
+  bundle: false,
   buildingId: "",
   alpha: 24,
   month: 12,
@@ -44,6 +45,7 @@ const view = {
   sky: null,
   hemi: null,
   city: null,
+  contextObjects: [],
   roadMat: null,
   waterMat: null,
   result: null,
@@ -52,16 +54,6 @@ const view = {
   quality: null,
   _q: null,
   lastRibbon: 0,
-};
-
-const KIND_COLOR = {
-  incoming: 0xf0c14b,
-  street: 0xe25a12,
-  neighbor: 0xc4496a,
-  sky: 0x1f8f86,
-  water: 0x2f6fbe,
-  ground: 0x8d8374,
-  roof: 0x6e645c,
 };
 
 function v3(e, n, u = 0) {
@@ -558,33 +550,6 @@ function makeSky() {
   return sky;
 }
 
-function curtainGeometry(building, facade, alpha) {
-  const positions = [];
-  const z0 = Math.max((building.minHeight || 0) + 3, 6);
-  const z1 = building.height - 1.2;
-  const nh = facade.n;
-  for (const edge of facade.edges) {
-    for (let sill = z0; sill < z1 - 1; sill += 3.5) {
-      const head = Math.min(3.15, z1 - sill);
-      const corners = [0, head].map((local) => {
-        const a = finPoint(edge.ax, edge.ay, local, nh, alpha, head);
-        const b = finPoint(edge.bx, edge.by, local, nh, alpha, head);
-        return [v3(a[0], a[1], a[2] + sill), v3(b[0], b[1], b[2] + sill)];
-      });
-      const a0 = corners[0][0];
-      const b0 = corners[0][1];
-      const a1 = corners[1][0];
-      const b1 = corners[1][1];
-      positions.push(a0.x, a0.y, a0.z, a1.x, a1.y, a1.z, b1.x, b1.y, b1.z);
-      positions.push(a0.x, a0.y, a0.z, b1.x, b1.y, b1.z, b0.x, b0.y, b0.z);
-    }
-  }
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  geometry.computeVertexNormals();
-  return geometry;
-}
-
 function ribbon(positions, a, b, width) {
   const dir = new THREE.Vector3().subVectors(b, a);
   if (dir.lengthSq() < 0.16) return;
@@ -601,202 +566,9 @@ function ribbon(positions, a, b, width) {
   positions.push(aL.x, aL.y, aL.z, bR.x, bR.y, bR.z, bL.x, bL.y, bL.z);
 }
 
-function pathReach(hero) {
-  let minE = Infinity;
-  let minN = Infinity;
-  let maxE = -Infinity;
-  let maxN = -Infinity;
-  let maxZ = 0;
-  for (const hop of hero.hops) {
-    for (const point of [hop.from, hop.to]) {
-      minE = Math.min(minE, point[0]);
-      maxE = Math.max(maxE, point[0]);
-      minN = Math.min(minN, point[1]);
-      maxN = Math.max(maxN, point[1]);
-      maxZ = Math.max(maxZ, point[2]);
-    }
-  }
-  return Math.max(Math.hypot(maxE - minE, maxN - minN), Math.min(maxZ, 160) * 0.45);
-}
-
-function standOff(e, n, z, focusE, focusN, focusZ, tile, minDist) {
-  let eye = clearEye(e, n, z, tile);
-  const dx = eye[0] - focusE;
-  const dy = eye[1] - focusN;
-  const dz = eye[2] - focusZ;
-  const len = Math.hypot(dx, dy, dz) || 1;
-  if (len >= minDist) return eye;
-  const scale = minDist / len;
-  return clearEye(focusE + dx * scale, focusN + dy * scale, Math.max(z, focusZ + dz * scale), tile);
-}
-
-function clearEye(e, n, z, tile) {
-  let x = e;
-  let y = n;
-  let zz = z;
-  for (let guard = 0; guard < 6; guard += 1) {
-    const hit = tile.buildings.find((building) => x >= building.bbox.min[0] && x <= building.bbox.max[0]
-      && y >= building.bbox.min[1] && y <= building.bbox.max[1]
-      && zz < building.height + 1.5 && zz > (building.minHeight || 0) - 0.5);
-    if (!hit) return [x, y, zz];
-    const cx = (hit.bbox.min[0] + hit.bbox.max[0]) / 2;
-    const cy = (hit.bbox.min[1] + hit.bbox.max[1]) / 2;
-    let dx = x - cx;
-    let dy = y - cy;
-    const len = Math.hypot(dx, dy);
-    if (len < 1.2) {
-      zz = hit.height + 20;
-      continue;
-    }
-    dx /= len;
-    dy /= len;
-    const reach = Math.max(hit.bbox.max[0] - hit.bbox.min[0], hit.bbox.max[1] - hit.bbox.min[1]) * 0.5 + 16;
-    x = cx + dx * reach;
-    y = cy + dy * reach;
-  }
-  return [x, y, Math.max(zz, 36)];
-}
-
-function heroFitPoints(hero) {
-  const points = [hero.hops[0].from];
-  for (const hop of hero.hops) {
-    if (hop.kind === "sky") {
-      points.push([
-        hop.from[0] + (hop.to[0] - hop.from[0]) * 0.55,
-        hop.from[1] + (hop.to[1] - hop.from[1]) * 0.55,
-        hop.from[2] + (hop.to[2] - hop.from[2]) * 0.55,
-      ]);
-    } else {
-      points.push(hop.to);
-    }
-  }
-  return points;
-}
-
-function frameOverflow(points) {
-  const narrow = window.innerWidth < 860;
-  // Desktop sheet covers the right; the phone sheet covers the bottom.
-  const xMax = 0.82;
-  const xMin = narrow ? -0.78 : -0.86;
-  const yMin = -0.62;
-  const yMax = narrow ? 0.72 : 0.78;
-  let bad = 0;
-  view.camera.updateMatrixWorld(true);
-  for (const pt of points) {
-    const p = v3(pt[0], pt[1], pt[2]).project(view.camera);
-    if (p.z < -1 || p.z > 1) bad += 2;
-    bad += Math.max(0, p.x - xMax) * 1.5;
-    bad += Math.max(0, xMin - p.x);
-    bad += Math.max(0, yMin - p.y) * (narrow ? 1.7 : 1);
-    bad += Math.max(0, p.y - yMax);
-  }
-  return bad;
-}
-
-function applySheetFraming() {
-  const width = $("scene-stage").clientWidth;
-  const height = Math.max(1, $("scene-stage").clientHeight);
-  view.camera.aspect = width / height;
-  view.camera.clearViewOffset();
-  view.camera.updateProjectionMatrix();
-}
-
-function applyEyeOffset(target, offset) {
-  const dist = Math.min(1280, Math.max(48, offset.length()));
-  offset.normalize().multiplyScalar(dist);
-  if (offset.y < dist * 0.06) offset.y = dist * 0.06;
-  view.camera.position.copy(target).add(offset);
-  view.camera.lookAt(target);
-  view.camera.updateMatrixWorld(true);
-  return offset;
-}
-
-// Pull the polyline into the part of the picture the sheet does not cover.
-function settleFrame(hero) {
-  if (!hero || !hero.hops.length || !view.controls) return;
-  const points = heroFitPoints(hero);
-  const target = view.controls.target.clone();
-  let offset = applyEyeOffset(target, view.camera.position.clone().sub(target));
-  for (let i = 0; i < 7 && frameOverflow(points) > 0.045; i += 1) {
-    offset = applyEyeOffset(target, offset.multiplyScalar(1.15));
-  }
-  if (frameOverflow(points) > 0.045) {
-    const base = offset.clone();
-    let bestScore = frameOverflow(points);
-    let best = base.clone();
-    for (const dir of [1, -1]) {
-      let trial = base.clone();
-      for (let i = 1; i <= 8; i += 1) {
-        trial = applyEyeOffset(target, trial.applyAxisAngle(new THREE.Vector3(0, 1, 0), dir * 0.1));
-        const score = frameOverflow(points);
-        if (score < bestScore - 0.01) {
-          bestScore = score;
-          best = trial.clone();
-        }
-      }
-    }
-    offset = applyEyeOffset(target, best);
-  }
-  const eye = view.camera.position;
-  const cleared = clearEye(eye.x, -eye.z, eye.y, view.tile);
-  view.camera.position.copy(v3(cleared[0], cleared[1], cleared[2]));
-  view.controls.target.copy(target);
-  view.controls.update();
-  view.fitOverflow = frameOverflow(points);
-  if (window.__glare) window.__glare.fit = view.fitOverflow;
-}
-
-function frameHero(hero, subject) {
-  if (!subject || !view.camera) return;
-  const n = subject.cluster.n;
-  const tx = -n[1];
-  const ty = n[0];
-  const building = subject.building;
-  const narrow = window.innerWidth < 860;
-  const street = state.mode === "street";
-  const waterEnd = !!(hero && hero.hops.length && !street && hero.hops[hero.hops.length - 1].kind === "water");
-  let focusE;
-  let focusN;
-  let focusZ;
-  if (hero && hero.hops.length) {
-    const joint = hero.hops[0].to;
-    const end = hero.hops[hero.hops.length - 1].to;
-    const from = hero.hops[0].from;
-    const wFrom = street ? 0.3 : waterEnd ? 0.24 : 0.28;
-    const wJoint = street ? 0.24 : waterEnd ? 0.38 : 0.5;
-    const wEnd = street ? 0.46 : waterEnd ? 0.38 : 0.22;
-    focusE = from[0] * wFrom + joint[0] * wJoint + end[0] * wEnd;
-    focusN = from[1] * wFrom + joint[1] * wJoint + end[1] * wEnd;
-    const endZ = street ? end[2] : (waterEnd ? end[2] : Math.min(end[2], joint[2] + 36));
-    focusZ = Math.max(
-      6,
-      from[2] * (street ? 0.22 : waterEnd ? 0.2 : 0.34)
-        + joint[2] * (street ? 0.2 : waterEnd ? 0.28 : 0.46)
-        + endZ * (street ? 0.58 : waterEnd ? 0.52 : 0.2),
-    );
-  } else {
-    const center = buildingCenter(building);
-    focusE = center[0] + n[0] * 8;
-    focusN = center[1] + n[1] * 8;
-    focusZ = Math.max(12, building.height * 0.28);
-  }
-  const span = hero ? Math.max(70, pathReach(hero)) : Math.max(70, building.height * 0.35);
-  const dist = Math.max(narrow ? 150 : 190, Math.min(narrow ? 340 : 460, span * 0.9 + 130));
-  let eyeE = focusE + n[0] * dist * 0.82 + tx * dist * 0.55;
-  let eyeN = focusN + n[1] * dist * 0.82 + ty * dist * 0.55;
-  let eyeZ = street
-    ? focusZ + (narrow ? 22 : 30)
-    : focusZ + (waterEnd ? (narrow ? 36 : 58) : Math.max(18, Math.min(48, focusZ * 0.12 + 16)));
-  [eyeE, eyeN, eyeZ] = standOff(eyeE, eyeN, eyeZ, focusE, focusN, focusZ, view.tile, dist * 0.72);
-  const targetZ = Math.max(3, focusZ);
-  view.camera.fov = narrow ? 54 : 47;
-  applySheetFraming();
-  view.camera.position.copy(v3(eyeE, eyeN, eyeZ));
-  view.controls.target.copy(v3(focusE, focusN, targetZ));
-  view.controls.update();
-  settleFrame(hero);
-  view._q = view.camera.quaternion.clone();
-  paintPaths();
+function applySheetFraming(){
+  view.camera.aspect=$('scene-stage').clientWidth/Math.max(1,$('scene-stage').clientHeight);
+  view.camera.clearViewOffset();view.camera.updateProjectionMatrix();
 }
 
 function dropDraw(obj) {
@@ -806,169 +578,102 @@ function dropDraw(obj) {
     if (child.geometry) child.geometry.dispose();
     if (child.material) {
       const list = Array.isArray(child.material) ? child.material : [child.material];
-      for (const material of list) material.dispose();
+      for (const material of list) {if(material.map)material.map.dispose();material.dispose();}
     }
   });
 }
 
-function hopStyle(kind, featured, distance) {
-  const base = featured
-    ? (kind === "incoming" ? 0.7 : kind === "water" ? 0.55 : 0.95)
-    : (kind === "water" ? 0.18 : kind === "sky" ? 0.3 : kind === "occlusion" ? 0.14 : kind === "incoming" ? 0.22 : 0.32);
-  const width = base * Math.max(0.85, Math.min(2.1, distance / 220));
-  let opacity = 0.84;
-  if (featured) opacity = kind === "water" ? 0.72 : 0.96;
-  else if (kind === "water") opacity = 0.34;
-  else if (kind === "sky") opacity = 0.58;
-  else if (kind === "occlusion") opacity = 0.42;
-  else if (kind === "incoming") opacity = 0.5;
-  return { width, opacity, depthTest: !featured };
+function selectedRootIds(){
+  const ids=view.result.paths.map(p=>p.id).filter(id=>state.mode!=='street'||view.result.terminals.some(t=>t.rootId===id&&t.kind==='street'&&t.touched));
+  if(!ids.includes(state.rayId)){
+    state.rayId=ids.find(id=>{const ns=view.result.nodes.filter(n=>n.rootId===id);return ns.some(n=>n.role==='fin')&&ns.some(n=>n.role==='original');})||ids[0]||null;
+    state.eventIndex=0;
+  }
+  if(!state.bundle)return [state.rayId].filter(Boolean);
+  const pivot=view.result.nodes.find(n=>n.rootId===state.rayId)?.point;
+  const distance=id=>{const point=view.result.nodes.find(n=>n.rootId===id)?.point;return point&&pivot?Math.hypot(...point.map((v,i)=>v-pivot[i])):Infinity;};
+  const nearby=ids.filter(id=>id!==state.rayId).sort((a,b)=>distance(a)-distance(b));
+  return [state.rayId,...nearby].filter(Boolean).slice(0,6);
 }
 
 function paintPaths() {
-  dropDraw(view.paths);
-  dropDraw(view.markers);
-  const group = new THREE.Group();
-  const marks = new THREE.Group();
-  const result = view.result;
-  if (!result || !view.camera) {
-    view.paths = group;
-    view.markers = marks;
-    view.drawnCount = 0;
-    view.strokeCounts = {};
-    view.scene.add(group);
-    view.scene.add(marks);
-    return;
+  dropDraw(view.paths);dropDraw(view.markers);
+  const group=new THREE.Group(),marks=new THREE.Group();
+  view.paths=group;view.markers=marks;view.scene.add(group,marks);
+  if(!view.result?.segments)return;
+  const ids=selectedRootIds(),colors={incident:0xc69531,reflected:0xdc6d37,transmitted:0x347fba};
+  const near=state.display==='module';
+  for(const segment of view.result.segments.filter(s=>ids.includes(s.rootId))){
+    const a=v3(...segment.from),b=v3(...segment.to),dir=b.clone().sub(a),length=dir.length();if(length<1e-7)continue;dir.normalize();
+    const material=new THREE.LineBasicMaterial({color:colors[segment.type],transparent:true,opacity:segment.rootId===state.rayId?1:.3,depthTest:!near});
+    const stroke=[];ribbon(stroke,a,b,near?(state.bundle?.12:.035):.55);
+    const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(stroke,3));
+    group.add(new THREE.Mesh(geo,new THREE.MeshBasicMaterial({color:colors[segment.type],transparent:true,opacity:segment.rootId===state.rayId?1:.3,side:THREE.DoubleSide,depthTest:!near})));
+    const anchor=segment.type==='incident'?b.clone().addScaledVector(dir,-(near?.8:15)):a.clone().addScaledVector(dir,Math.min(length*.4,near?1.1:12));
+    const arrow=new THREE.ArrowHelper(dir,anchor,Math.min(length*.3,near?.55:7),colors[segment.type],near?.16:2,near?.09:1.2);group.add(arrow);
   }
-  const drawn = selectDrawn(result.paths, state.mode, view.hero, state.showHop2, {
-    mobile: view.quality.low,
-    elevationDeg: momentSun().pos.elevationDeg,
+  const nodes=view.result.nodes.filter(n=>n.rootId===state.rayId);
+  state.eventIndex=Math.max(0,Math.min(state.eventIndex,nodes.length-1));
+  nodes.forEach((node,i)=>{
+    const marker=new THREE.Mesh(new THREE.SphereGeometry(near?.055:1.5,10,8),new THREE.MeshBasicMaterial({color:i===state.eventIndex?0x174e43:0xc8a063,depthTest:false}));
+    marker.position.copy(v3(...node.point));marks.add(marker);
+    if(near){
+      const canvas=document.createElement('canvas');canvas.width=128;canvas.height=40;const ctx=canvas.getContext('2d');
+      ctx.fillStyle='#ffffff';ctx.fillRect(0,0,128,40);ctx.fillStyle='#285444';ctx.font='28px sans-serif';ctx.textAlign='center';ctx.fillText(node.id,64,28);
+      const texture=new THREE.CanvasTexture(canvas),label=new THREE.Sprite(new THREE.SpriteMaterial({map:texture,depthTest:false,depthWrite:false,toneMapped:false}));label.position.copy(marker.position).add(new THREE.Vector3(.2,.2,0));label.scale.set(1.15,.38,1);label.renderOrder=100;marks.add(label);
+    }
   });
-  view.drawn = drawn;
-  view.drawnCount = drawn.length;
-  view.strokeCounts = {};
-  for (const path of drawn) {
-    for (const hop of path.hops) view.strokeCounts[hop.kind] = (view.strokeCounts[hop.kind] || 0) + 1;
+  if(near&&nodes[state.eventIndex]){
+    const node=nodes[state.eventIndex],from=v3(...node.point),direction=v3(...node.normal);
+    marks.add(new THREE.ArrowHelper(direction,from,1.25,0x7b8c84,.14,.075));
   }
-  const buckets = new Map();
-  const pushSeg = (kind, a, b, featured) => {
-    const distance = view.camera.position.distanceTo(a.clone().add(b).multiplyScalar(0.5));
-    const style = hopStyle(kind, featured, distance);
-    const key = `${kind}:${featured ? "hero" : "rest"}:${style.depthTest ? 1 : 0}`;
-    if (!buckets.has(key)) buckets.set(key, { kind, segments: [], opacity: style.opacity, depthTest: style.depthTest });
-    const bucket = buckets.get(key);
-    const positions = [];
-    ribbon(positions, a, b, style.width);
-    if (positions.length) bucket.segments.push(positions);
-  };
-  const lift = (e, n, u) => {
-    const point = v3(e, n, u);
-    point.y += 0.75;
-    return point;
-  };
-  for (const path of drawn) {
-    const featured = path.featured === true;
-    if (state.showIncoming && featured) {
-      const toward = momentSun().sun;
-      const from = path.origin;
-      pushSeg(
-        "incoming",
-        lift(from[0] + toward[0] * 78, from[1] + toward[1] * 78, from[2] + toward[2] * 78),
-        lift(from[0], from[1], from[2]),
-        true,
-      );
-    }
-    for (const hop of path.hops) {
-      const a = lift(hop.from[0], hop.from[1], hop.from[2]);
-      const b = lift(hop.to[0], hop.to[1], hop.to[2]);
-      // Sky auxiliaries stop short. Neighbour strokes stay full length so the pink line does not fade into a stub.
-      const end = !featured && hop.kind === "sky" ? a.clone().lerp(b, 0.62) : b;
-      pushSeg(hop.kind, a, end, featured);
-    }
-    const land = path.hops[path.hops.length - 1];
-    const skyAux = !featured && land.kind === "sky";
-    const discRadius = featured ? (land.kind === "street" || land.kind === "water" ? 5.4 : 3.3) : (skyAux ? 0.7 : 1.15);
-    const disc = new THREE.Mesh(
-      new THREE.CircleGeometry(discRadius, 14),
-      new THREE.MeshBasicMaterial({
-        color: KIND_COLOR[land.kind] || 0xffffff,
-        side: THREE.DoubleSide,
-        depthTest: false,
-        transparent: true,
-        opacity: featured ? 0.95 : (skyAux ? 0.42 : 0.75),
-      }),
-    );
-    disc.position.copy(lift(land.to[0], land.to[1], land.to[2]));
-    if (land.kind === "street" || land.kind === "ground" || land.kind === "water") {
-      disc.rotation.x = -Math.PI / 2;
-      if (featured) {
-        const pin = new THREE.Mesh(
-          new THREE.SphereGeometry(land.kind === "water" ? 2.4 : 2.8, 12, 10),
-          new THREE.MeshBasicMaterial({ color: KIND_COLOR[land.kind] || 0xffffff, depthTest: false }),
-        );
-        pin.position.copy(disc.position);
-        pin.position.y += 1.4;
-        marks.add(pin);
-      }
-    } else disc.lookAt(view.camera.position);
-    marks.add(disc);
-    if (featured && path.hops.length > 1) {
-      const joint = new THREE.Mesh(
-        new THREE.SphereGeometry(1.7, 12, 10),
-        new THREE.MeshBasicMaterial({ color: 0xfff6df, depthTest: false }),
-      );
-      joint.position.copy(lift(path.hops[0].to[0], path.hops[0].to[1], path.hops[0].to[2]));
-      marks.add(joint);
-    }
-  }
-  if (state.mode === "reflect") {
-    for (const mark of (result.occlusions || []).slice(0, view.quality.low ? 3 : 5)) {
-      pushSeg("occlusion", lift(mark.from[0], mark.from[1], mark.from[2]), lift(mark.to[0], mark.to[1], mark.to[2]), false);
-    }
-  }
-  for (const bucket of buckets.values()) {
-    const positions = bucket.segments.flat();
-    if (!positions.length) continue;
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-    const color = bucket.kind === "occlusion" ? 0x8ea0b8 : (KIND_COLOR[bucket.kind] || 0xffffff);
-    group.add(new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
-      color,
-      transparent: true,
-      opacity: bucket.opacity,
-      depthTest: bucket.depthTest,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    })));
-  }
-  view.paths = group;
-  view.markers = marks;
-  view.scene.add(group);
-  view.scene.add(marks);
+  view.drawnCount=ids.length;view.strokeCounts={};view.drawn=[];
 }
 
-function updateCurtain() {
-  if (view.curtain) view.curtain.visible = state.scenario !== "baseline";
-  const subject = currentSubject();
-  if (!subject) return;
-  const geometry = curtainGeometry(subject.building, subject.cluster, state.alpha);
-  if (!view.curtain) {
-    const material = new THREE.MeshStandardMaterial({
-      color: 0xb5d0b5,
-      roughness: 0.12,
-      metalness: 0.35,
-      emissive: 0x244e30,
-      emissiveIntensity: 0.18,
-      side: THREE.DoubleSide,
-    });
-    addGlassFresnel(material, 0.28);
-    view.curtain = new THREE.Mesh(geometry, material);
-    view.curtain.visible = state.scenario !== "baseline";
-    view.scene.add(view.curtain);
-  } else {
-    view.curtain.geometry.dispose();
-    view.curtain.geometry = geometry;
+function updateCurtain(){
+  dropDraw(view.curtain);
+  const group=new THREE.Group(),selected=new Set((view.result.nodes||[]).filter(n=>n.rootId===state.rayId).map(n=>n.surfaceId));
+  const focus=view.result.nodes?.find(n=>n.rootId===state.rayId)?.point;
+  for(const role of ['original','fin']){
+    const positions=[],edges=[],highlight=[];
+    for(const surface of view.result.surfaces||[]){
+      if(surface.role!==role)continue;
+      if(state.display==='module'&&!state.bundle&&role==='fin'&&focus&&Math.hypot(...surface.origin.map((v,i)=>v-focus[i]))>9)continue;
+      const c=surface.corners.map(p=>v3(...p));
+      for(const i of [0,1,2,0,2,3])positions.push(...c[i].toArray());
+      for(let i=0;i<4;i++)edges.push(...c[i].toArray(),...c[(i+1)%4].toArray());
+      if(selected.has(surface.id))for(const i of [0,1,2,0,2,3])highlight.push(...c[i].toArray());
+    }
+    const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));
+    group.add(new THREE.Mesh(geometry,new THREE.MeshBasicMaterial({color:role==='fin'?0x9bc7b5:0xb6cdd8,transparent:true,opacity:role==='fin'?.14:.1,side:THREE.DoubleSide,depthWrite:false})));
+    const edgeGeo=new THREE.BufferGeometry();edgeGeo.setAttribute('position',new THREE.Float32BufferAttribute(edges,3));group.add(new THREE.LineSegments(edgeGeo,new THREE.LineBasicMaterial({color:role==='fin'?0x86ab98:0xb3c3cb,transparent:true,opacity:.6})));
+    const hi=new THREE.BufferGeometry();hi.setAttribute('position',new THREE.Float32BufferAttribute(highlight,3));group.add(new THREE.Mesh(hi,new THREE.MeshBasicMaterial({color:role==='fin'?0x82b59b:0x97bbd0,transparent:true,opacity:.2,side:THREE.DoubleSide,depthWrite:false})));
   }
+  view.curtain=group;view.scene.add(group);
+}
+
+function frameActive(){
+  if(!view.camera||!currentSubject())return;
+  const subject=currentSubject();
+  const activeIds=state.bundle?selectedRootIds():[state.rayId];
+  const activeNodes=view.result?.nodes?.filter(n=>activeIds.includes(n.rootId))||[];
+  const first=activeNodes[0];
+  const fallback=subject.building.centroid||buildingCenter(subject.building);
+  const point=first?first.point.map((_,axis)=>(Math.min(...activeNodes.map(n=>n.point[axis]))+Math.max(...activeNodes.map(n=>n.point[axis])))/2):[fallback[0],fallback[1],subject.building.height*.4];
+  const span=first?Math.hypot(...point.map((_,axis)=>Math.max(...activeNodes.map(n=>n.point[axis]))-Math.min(...activeNodes.map(n=>n.point[axis])))):0;
+  const localDistance=Math.max(10,span*1.35);
+  const local=state.display==='module',n=subject.cluster.n,t=[-n[1],n[0]];
+  view.camera.fov=local?38:47;view.controls.minDistance=local?2:25;view.controls.maxDistance=local?500:1800;
+  view.controls.target.copy(v3(...point));
+  view.camera.position.copy(v3(point[0]+n[0]*(local?localDistance*.58:300)+t[0]*(local?localDistance*.82:170),point[1]+n[1]*(local?localDistance*.58:300)+t[1]*(local?localDistance*.82:170),point[2]+(local?localDistance*.25:150)));
+  view.camera.updateProjectionMatrix();view.controls.update();view._q=view.camera.quaternion.clone();
+  for(const obj of view.contextObjects)obj.visible=!local;
+  if(view.city)view.city.visible=!local;
+  if(view.sky)view.sky.visible=!local;
+  if(view.sunOrb)view.sunOrb.visible=!local;
+  view.scene.background=local?new THREE.Color(0xf1f5f0):null;
+  document.body.dataset.scene=local?'module':'city';
+  paintPaths();
 }
 
 function skyLook(elev) {
@@ -1053,17 +758,6 @@ function updateSun() {
   view.sunLight.shadow.needsUpdate = true;
 }
 
-function emptyResult() {
-  return {
-    paths: [],
-    occlusions: [],
-    counts: {
-      panels: 0, lit: 0, backlit: 0, shaded: 0, street: 0, neighbor: 0, water: 0, sky: 0,
-      ground: 0, roof: 0, hop2: 0, hop2sky: 0, hop2water: 0, hop2street: 0,
-    },
-  };
-}
-
 function applyModeLook() {
   if (!view.roadMat) return;
   const street = state.mode === "street";
@@ -1073,59 +767,18 @@ function applyModeLook() {
   document.body.dataset.mode = state.mode;
 }
 
-function retrace() {
-  const subject = currentSubject();
-  const sun = momentSun();
-  if (!subject || sun.pos.elevationDeg <= 0.35) {
-    view.result = emptyResult();
-    view.hero = null;
-  } else {
-    view.result = traceTwin(view.tile, {
-      scenario: state.scenario,
-      building: subject.building,
-      facade: subject.cluster,
-      alpha: state.alpha,
-      sun: sun.sun,
-      dni: sun.dni,
-      rho: state.rho,
-      stepH: view.quality.stepH,
-      stepV: view.quality.stepV,
-    });
-    view.hero = pickHero(state.mode === "street" && !state.showHop2 ? view.result.paths.filter(p=>p.kind === "street") : view.result.paths, state.mode);
-  }
-  updateCurtain();
-  updateSun();
-  applyModeLook();
-  paintPaths();
-  writeHud(sun);
-  window.__glare = {
-    ready: true,
-    frame: "ENU x east, y north, z up; three.js (e, u, -n)",
-    state: { ...state },
-    counts: view.result.counts,
-    hero: view.hero ? describePath(view.hero) : "",
-    heroHops: view.hero ? view.hero.hops.length : 0,
-    drawn: view.drawnCount,
-    strokes: view.strokeCounts || {},
-    paths: (view.drawn || []).map((path) => ({
-      featured: path.featured === true,
-      name: path.neighborName || "",
-      hops: path.hops.map((hop) => {
-        const dx = hop.to[0] - hop.from[0];
-        const dy = hop.to[1] - hop.from[1];
-        const dz = hop.to[2] - hop.from[2];
-        return { kind: hop.kind, len: Math.round(Math.hypot(dx, dy, dz) * 10) / 10 };
-      }),
-    })),
-    occlusions: (view.result.occlusions || []).length,
-    coarse: view.city ? view.city.userData.coarse : 0,
-    quality: view.quality.low ? "low" : "high",
-    building: subject ? subject.building.name : "",
-    sun: { elevation: sun.pos.elevationDeg, azimuth: sun.pos.azimuthDeg },
-  };
-  const baseline = traceTwin(view.tile, {...currentOptions(), scenario: 'baseline', alpha: 0});
-  const detail = {state:{...state},result:view.result,baseline,sun:{...sun.pos,dni:sun.dni},meta:view.tile.meta};
-  window.__twin = {state:{...state},metrics:summarize(view.result),baseline:summarize(baseline)};
+function retrace(){
+  if(!currentSubject())return;
+  const sun=momentSun();
+  view.result=traceTwin(view.tile,currentOptions());
+  selectedRootIds();updateCurtain();updateSun();applyModeLook();frameActive();writeHud(sun);
+  view.baseline=state.scenario==='baseline'?view.result:traceTwin(view.tile,{...currentOptions(),scenario:'baseline',alpha:0});
+  publishTwin(sun);
+}
+function publishTwin(sun=momentSun()){
+  const baseline=view.baseline||view.result;
+  const detail={state:{...state},result:view.result,baseline,sun:{...sun.pos,dni:sun.dni},meta:view.tile.meta,context:{buildings:view.tile.buildings}};
+  window.__twin={state:{...state},metrics:summarize(view.result),ledger:view.result.ledger};
   document.dispatchEvent(new CustomEvent('twin:update',{detail}));
 }
 
@@ -1134,48 +787,18 @@ function currentOptions() {
   return {building:subject.building,facade:subject.cluster,alpha:state.alpha,scenario:state.scenario,sun:sun.sun,dni:sun.dni,rho:state.rho};
 }
 
-function writeHud(sun) {
-  const subject = currentSubject();
-  const building = subject && subject.building;
-  const counts = view.result.counts;
-  const elev = sun.pos.elevationDeg;
-  let lead;
-  if (elev <= 0.35) lead = "当前低于预览太阳高度阈值，不计算直射光路。";
-  else if (state.mode === "street" && !view.hero) lead = "这一时刻没有光落到街上。拧时刻或倾角，或切到「单纯看反射」看打向楼、水和天的光。";
-  else if (!view.hero && counts.shaded > 0 && counts.lit === 0) lead = "这一面的直射被旁边的楼挡住了，所以没有反射折线。换一个时刻，或换一栋朝向太阳的楼。";
-  else if (!view.hero && counts.backlit > 0 && counts.lit === 0) lead = "太阳在这面玻璃的背后。拧到太阳照到这面的时刻，折线才会出来。";
-  else if (state.mode === "street") lead = describePath(view.hero).replace("折线：", "落到街的折线：").replace("一跳：", "落到街：");
-  else lead = describePath(view.hero);
-  if (elev > 0.35 && elev < 9 && view.hero) lead = `低太阳。${lead}`;
-  $("path-readout").textContent = lead;
-  if (building) {
-    const source = building.heightNote || (recordedHeight(building) ? "记录高度" : "高度推断");
-    const face = subject.cluster.n[1] < -0.4 ? "朝南的一面" : "朝街的一面";
-    $("building-meta").textContent = `${building.height.toFixed(0)} m · ${source} · 候选立面 · 原幕墙固定，上铰外屏向外展开。`;
-  }
-  $("alpha-val").textContent = `${state.alpha.toFixed(1)}°`;
-  $("date-val").textContent = `${state.month}月${state.day}日`;
-  $("time-val").textContent = `${String(state.hour).padStart(2, "0")}:${String(state.minute).padStart(2, "0")}`;
-  $("rho-val").textContent = state.rho.toFixed(2);
-  $("mode-street").setAttribute("aria-checked", state.mode === "street" ? "true" : "false");
-  $("mode-reflect").setAttribute("aria-checked", state.mode === "reflect" ? "true" : "false");
-  const shown = view.drawnCount || 0;
-  const total = view.result.paths.length;
-  const streetHits = view.result.paths.filter((path) => path.hops.some((hop) => hop.kind === "street")).length;
-  $("mode-hint").textContent = state.mode === "street"
-    ? (streetHits
-      ? `落到街的有 ${streetHits} 条，画面留了 ${shown} 条，主折线加粗。先打到邻楼或水面、再落到街的也留着。其它方向先藏起来，路面会亮一点。`
-      : "画面里没有落到街的光。其它反射先藏起来了。")
-    : `算出来 ${total} 条反射，画面收成 ${shown} 条，免得叠成一团。主折线加粗；水面那一跳更细、更淡。不判断过不过。`;
-  const az = ((sun.pos.azimuthDeg % 360) + 360) % 360;
-  const low = elev > 0.35 && elev < 10 ? " · 低太阳，影子拉长" : "";
-  const blocked = counts.panels && counts.shaded / counts.panels > 0.3 ? ` · 直射有 ${counts.shaded} 块被旁边的楼挡住` : "";
-  $("sun-readout").textContent = `太阳高度 ${elev.toFixed(1)}° · 方位 ${az.toFixed(0)}°（从北顺时针）${low}${blocked} · 2026`;
-  const c = counts;
-  $("counts").textContent = `板元 ${c.panels} · 照到 ${c.lit} · 背光 ${c.backlit} · 被挡住 ${c.shaded} · 一跳街 ${c.street} / 邻楼 ${c.neighbor} / 水 ${c.water} / 天 ${c.sky} · 二跳 ${c.hop2}（向天 ${c.hop2sky} · 向水 ${c.hop2water} · 向街 ${c.hop2street}）`;
-  const mix = view.tile.meta.counts;
-  const pct = (key) => (mix.rendered ? Math.round((100 * (mix[key] || 0)) / mix.rendered) : 0);
-  $("ratio").textContent = `这片 ${mix.rendered} 栋都进了场景。OSM 高度 ${mix.heightTagged}（${pct("heightTagged")}%），维基数据 ${mix.wikidata || 0}（${pct("wikidata")}%），开放数据 ${mix.openData || 0}（${pct("openData")}%），层数推断 ${mix.levelsInferred || 0}，默认推断 ${mix.defaultInferred || 0}。缺高度仍没画上的 ${mix.omittedNoHeight || 0} 栋。`;
+function writeHud(sun){
+  const subject=currentSubject(),nodes=view.result.nodes.filter(n=>n.rootId===state.rayId),node=nodes[state.eventIndex];
+  $('path-readout').textContent=node?`${state.rayId} · 交点 ${state.eventIndex+1}/${nodes.length} · ${node.role==='fin'?'外屏':'原幕墙'} ${node.surfaceId}`:'没有命中目标立面的入射采样';
+  $('building-meta').textContent=`${subject.building.height.toFixed(0)} m · ${subject.building.heightNote||'来源见数据'} · 有限外屏、固定原幕墙`;
+  $('alpha-val').textContent=state.alpha.toFixed(1)+'°';$('date-val').textContent=`${state.month}月${state.day}日`;
+  $('time-val').textContent=`${String(state.hour).padStart(2,'0')}:${String(state.minute).padStart(2,'0')}`;
+  $('rho-val').textContent=state.rho.toFixed(2);
+  $('mode-street').setAttribute('aria-checked',state.mode==='street');$('mode-reflect').setAttribute('aria-checked',state.mode==='reflect');
+  $('mode-hint').textContent=`${view.result.paths.length} 条入射命中目标；显示 ${view.drawnCount} 棵完整分支树。邻楼材料未知时停止，不推断镜面第二跳。`;
+  $('sun-readout').textContent=`太阳高度 ${sun.pos.elevationDeg.toFixed(1)}° · 方位 ${sun.pos.azimuthDeg.toFixed(0)}° · 香港时间 / 2026`;
+  $('counts').textContent=`发射 ${view.result.roots.length} · 交点 ${view.result.nodes.length} · 归一化能量残差 ${view.result.ledger.residual.toExponential(2)}`;
+  $('ratio').textContent='370栋开放数据建筑；高度包含记录与推断，非现场材料或几何测量。';
 }
 
 function bind() {
@@ -1192,7 +815,7 @@ function bind() {
     state.buildingId = select.value;
     mountCity();
     retrace();
-    frameHero(view.hero, currentSubject());
+    frameActive();
   });
   $("alpha").addEventListener("input", () => {
     state.scenario = "adaptive";
@@ -1219,12 +842,12 @@ function bind() {
   $("mode-street").addEventListener("click", () => {
     state.mode = "street";
     retrace();
-    frameHero(view.hero, currentSubject());
+    frameActive();
   });
   $("mode-reflect").addEventListener("click", () => {
     state.mode = "reflect";
     retrace();
-    frameHero(view.hero, currentSubject());
+    frameActive();
   });
   $("hop2").addEventListener("change", () => {
     state.showHop2 = $("hop2").checked;
@@ -1234,7 +857,7 @@ function bind() {
     state.showIncoming = $("incoming").checked;
     paintPaths();
   });
-  $("frame").addEventListener("click", () => frameHero(view.hero, currentSubject()));
+  $("frame").addEventListener("click", frameActive);
 }
 
 function resize() {
@@ -1246,7 +869,7 @@ function resize() {
   applySheetFraming();
   canvas.style.width = "100%";
   canvas.style.height = "100%";
-  if (view.tile && currentSubject()) frameHero(view.hero, currentSubject());
+  if (view.tile && currentSubject()) frameActive();
 }
 
 async function boot() {
@@ -1313,12 +936,12 @@ async function boot() {
   ground.receiveShadow = true;
   const groundMat = ground.material;
   groundMat.color.set(0xb7aea2);
-  view.scene.add(ground);
+  view.scene.add(ground);view.contextObjects.push(ground);
   view.sky = makeSky();
   view.sky.position.copy(v3(midE, midN, 0));
   view.scene.add(view.sky);
-  view.scene.add(buildWater(view.tile));
-  view.scene.add(buildRoads(view.tile));
+  const water=buildWater(view.tile),roads=buildRoads(view.tile);
+  view.scene.add(water,roads);view.contextObjects.push(water,roads);
   mountCity();
 
   view.sunLight = new THREE.DirectionalLight(0xfff1d6, 1.6);
@@ -1345,7 +968,7 @@ async function boot() {
   $("clock").value = String(state.hour * 60 + state.minute);
   $("rho").value = String(state.rho);
   bind();
-  initDashboard({
+  const dashboardApi={
     update(patch) {
       if(state.scenario==='adaptive')state.manualAlpha=state.alpha;
       Object.assign(state,patch);
@@ -1362,19 +985,26 @@ async function boot() {
         return {scenario,angle,metrics:summarize(traceTwin(view.tile,{...currentOptions(),scenario,alpha:angle}))};
       });
     },
-    recommend:()=>recommend(view.tile,currentOptions()),
+    recommend:()=>null,
+    selectRay(id){state.mode='reflect';state.rayId=id;state.eventIndex=0;selectedRootIds();updateCurtain();paintPaths();writeHud(momentSun());frameActive();publishTwin();},
+    event(index){state.eventIndex=index;paintPaths();writeHud(momentSun());publishTwin();},
+    scene(display){state.display=display;updateCurtain();frameActive();publishTwin();},
+    bundle(value){state.bundle=value;updateCurtain();frameActive();writeHud(momentSun());publishTwin();},
     overview() {
+      state.display='city';updateCurtain();frameActive();
       const subject=currentSubject(), c=buildingCenter(subject.building);
       view.controls.target.copy(v3(c[0],c[1],subject.building.height*.4));
       view.camera.position.copy(v3(c[0]+300,c[1]-450,subject.building.height+260));
-      view.controls.update();
+      view.controls.update();publishTwin();
     }
-  });
+  };
+  initDashboard(dashboardApi);
+  initPathInspector(dashboardApi);
   resize();
   window.addEventListener("resize", resize);
   new ResizeObserver(() => resize()).observe($("scene-stage"));
   retrace();
-  frameHero(view.hero, currentSubject());
+  frameActive();
   $("boot").hidden = true;
 
   renderer.setAnimationLoop(() => {
