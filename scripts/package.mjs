@@ -5,6 +5,6 @@ const root=fileURLToPath(new URL('../',import.meta.url));
 const output=path.join(root,'dist');
 await mkdir(output,{recursive:true});
 for(const folder of ['js','css','data'])await mkdir(path.join(output,folder),{recursive:true});
-for(const file of ['index.html','favicon.svg','.nojekyll','css/city.css','data/central.json','data/preset.json',...['main','optics','solar','twin','dashboard','finite-optics','path-inspector'].map(n=>'js/'+n+'.js')])await copyFile(path.join(root,file),path.join(output,file));
+for(const file of ['index.html','favicon.svg','.nojekyll','css/city.css','data/central.json','data/preset.json',...['main','optics','solar','twin','dashboard','finite-optics','path-inspector','city-scene','render-effects'].map(n=>'js/'+n+'.js')])await copyFile(path.join(root,file),path.join(output,file));
 await cp(path.join(root,'vendor'),path.join(output,'vendor'),{recursive:true});
 console.log('Static site packaged in dist/');

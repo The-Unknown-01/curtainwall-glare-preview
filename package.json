@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node test_preview.mjs && node test_optics.mjs && node test_twin.mjs && node test_finite.mjs",
+    "test": "node test_preview.mjs && node test_optics.mjs && node test_twin.mjs && node test_finite.mjs && node test_city.mjs",
     "build": "node scripts/package.mjs"
   }
 }
