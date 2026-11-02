@@ -490,7 +490,9 @@ function retrace(){
   if(!currentSubject())return;
   const sun=momentSun();
   view.result=traceTwin(view.tile,currentOptions());
-  selectedRootIds();updateCurtain();updateSun();applyModeLook();frameActive();writeHud(sun);
+  selectedRootIds();updateCurtain();updateSun();applyModeLook();
+  if(state.display==="module")frameActive();else paintPaths();
+  writeHud(sun);
   view.baseline=state.scenario==='baseline'?view.result:traceTwin(view.tile,{...currentOptions(),scenario:'baseline',alpha:0});
   publishTwin(sun);
 }
